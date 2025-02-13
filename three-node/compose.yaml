@@ -1,0 +1,24 @@
+version: '3'
+services:
+  owner:
+    build: .
+    command: ["--role", "owner"]
+    volumes:
+      - owner-data:/app/work_dir
+
+  admin:
+    build: .
+    command: ["--role", "admin"]
+    volumes:
+      - admin-data:/app/work_dir
+
+  operator:
+    build: .
+    command: ["--role", "operator"]
+    volumes:
+      - operator-data:/app/work_dir
+
+volumes:
+  owner-data:
+  admin-data:
+  operator-data:

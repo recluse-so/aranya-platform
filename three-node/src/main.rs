@@ -134,6 +134,8 @@ async fn main() -> Result<()> {
 
     info!("starting example Aranya application");
 
+    let role = std::env::args().nth(1).unwrap_or_else(|| "owner".to_string());
+
     let sync_interval = Duration::from_millis(100);
     let sleep_interval = sync_interval * 6;
 
@@ -142,10 +144,16 @@ async fn main() -> Result<()> {
 
     let mut team = TeamCtx::new("test_afc_router".into(), work_dir).await?;
 
+    let user_ctx = match role.as_str() {
+        "owner" => team.owner,
+        "admin" => team.admin,
+        "operator" => team.operator,
+        _ => return Err(anyhow::anyhow!("Invalid role: {}", role)),
+    };
+
     // create team.
     info!("creating team");
-    let team_id = team
-        .owner
+    let team_id = user_ctx
         .client
         .create_team()
         .await
