@@ -1,12 +1,13 @@
-# aranya-platform# Example Rust Application
+# Aranya Platform Example
 
 This is a `cargo-generate` template.
 
 An example of how to use the `aranya-client` library to:
+
 - Setup a team
 - Sync Aranya graphs
 - Create an Aranya Fast Channel
-- Send encrypted data between peers
+- Send encrypted data between 3 different users
 
 During setup, the example application starts an instance of the `aranya-daemon` for each Aranya user in the background. The daemon automatically handles syncing Aranya graph states between peers to the Aranya client can focus on the operations it wants to perform on the team.
 

@@ -20,6 +20,7 @@ use tokio::{fs, task, time::sleep};
 use tracing::{debug, info};
 use tracing_subscriber::{prelude::*, EnvFilter};
 
+// TeamCtx is a context for a team of users.
 struct TeamCtx {
     owner: UserCtx,
     admin: UserCtx,
@@ -28,6 +29,7 @@ struct TeamCtx {
     memberb: UserCtx,
 }
 
+// new creates a new team context.
 impl TeamCtx {
     pub async fn new(name: String, work_dir: PathBuf) -> Result<Self> {
         let owner = UserCtx::new(name.clone(), "owner".into(), work_dir.join("owner")).await?;
@@ -49,12 +51,14 @@ impl TeamCtx {
     }
 }
 
+// UserCtx is a context for a user.
 struct UserCtx {
     client: Client,
     pk: KeyBundle,
     id: DeviceId,
 }
 
+// new creates a new user context.
 impl UserCtx {
     pub async fn new(team_name: String, name: String, work_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(work_dir.clone()).await?;
@@ -115,6 +119,7 @@ impl UserCtx {
     }
 }
 
+// main is the entry point for the application.
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
