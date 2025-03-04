@@ -150,7 +150,12 @@ async fn main() -> Result<()> {
         "operator" => team.operator,
         _ => return Err(anyhow::anyhow!("Invalid role: {}", role)),
     };
-
+    /*
+        let mut user_ctx = match role.as_str() {
+        "owner" => team.owner.clone(),
+        "admin" => team.admin.clone(),
+        "operator" => team.operator.clone(),
+    */
     // create team.
     info!("creating team");
     let team_id = user_ctx

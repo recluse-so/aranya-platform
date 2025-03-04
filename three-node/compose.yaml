@@ -1,22 +1,35 @@
-version: '3'
+version: '3.9'
+
 services:
   owner:
+    container_name: owner
     build: .
     command: ["--role", "owner"]
     volumes:
       - owner-data:/app/work_dir
 
   admin:
+    container_name: admin
     build: .
     command: ["--role", "admin"]
     volumes:
       - admin-data:/app/work_dir
 
   operator:
+    container_name: operator
     build: .
     command: ["--role", "operator"]
     volumes:
       - operator-data:/app/work_dir
+  
+  opa:
+    container_name: opa
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--log-level", "debug", "--bundle", "/policies"]
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./policies:/policies
 
 volumes:
   owner-data:
