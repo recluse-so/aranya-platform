@@ -1,26 +1,32 @@
-use core::str;
+
+
+
+
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use anyhow::{Context, Result};
-use aranya_client::{AfcMsg, Client};
+use anyhow::{bail, Context as _, Result};
+use aranya_client::{AfcMsg, Client, Label};
 use aranya_daemon::{
     config::{AfcConfig, Config},
     Daemon,
 };
+
 use aranya_daemon_api::{DeviceId, KeyBundle, NetIdentifier, Role};
-use aranya_fast_channels::Label;
 use aranya_util::Addr;
 use backon::{ExponentialBuilder, Retryable};
 use tempfile::tempdir;
 use tokio::{fs, task, time::sleep};
-use tracing::{debug, info};
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing::{debug, info, Metadata};
+use tracing_subscriber::{
+    layer::{Context, Filter},
+    prelude::*,
+    EnvFilter,
+};
 
-// TeamCtx is a context for a team of users.
 struct TeamCtx {
     owner: UserCtx,
     admin: UserCtx,
@@ -29,7 +35,7 @@ struct TeamCtx {
     memberb: UserCtx,
 }
 
-// new creates a new team context.
+/// TeamCtx is a struct that contains the context for a team.
 impl TeamCtx {
     pub async fn new(name: String, work_dir: PathBuf) -> Result<Self> {
         let owner = UserCtx::new(name.clone(), "owner".into(), work_dir.join("owner")).await?;
@@ -51,14 +57,12 @@ impl TeamCtx {
     }
 }
 
-// UserCtx is a context for a user.
 struct UserCtx {
     client: Client,
     pk: KeyBundle,
     id: DeviceId,
 }
 
-// new creates a new user context.
 impl UserCtx {
     pub async fn new(team_name: String, name: String, work_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(work_dir.clone()).await?;
@@ -98,10 +102,17 @@ impl UserCtx {
         sleep(Duration::from_millis(100)).await;
 
         // Initialize the user library.
-        let mut client = (|| Client::connect(&uds_api_path, Path::new(&shm_path), max_chans, any))
-            .retry(ExponentialBuilder::default())
-            .await
-            .context("unable to init client")?;
+        let mut client = (|| {
+            Client::connect(
+                &cfg.uds_api_path,
+                Path::new(&cfg.afc.shm_path),
+                cfg.afc.max_chans,
+                cfg.sync_addr.to_socket_addrs(),
+            )
+        })
+        .retry(ExponentialBuilder::default())
+        .await
+        .context("unable to initialize client")?;
 
         // Get device id and key bundle.
         let pk = client.get_key_bundle().await.expect("expected key bundle");
@@ -119,22 +130,62 @@ impl UserCtx {
     }
 }
 
-// main is the entry point for the application.
+/// Repeatedly calls `poll_afc_data`, followed by `handle_afc_data`, until all
+/// of the clients are pending.
+macro_rules! do_poll {
+    ($($client:expr),*) => {
+        debug!(
+            clients = stringify!($($client),*),
+            "start `do_poll`",
+        );
+        loop {
+            tokio::select! {
+                biased;
+                $(data = $client.poll_afc_data() => {
+                    $client.handle_afc_data(data?).await?
+                },)*
+                _ = async {} => break,
+            }
+        }
+        debug!(
+            clients = stringify!($($client),*),
+            "finish `do_poll`",
+        );
+    };
+}
+
+struct DemoFilter {
+    env_filter: EnvFilter,
+}
+
+impl<S> Filter<S> for DemoFilter {
+    fn enabled(&self, metadata: &Metadata<'_>, context: &Context<'_, S>) -> bool {
+        if metadata.target().starts_with(module_path!()) {
+            true
+        } else {
+            self.env_filter.enabled(metadata, context.clone())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let filter = DemoFilter {
+        env_filter: EnvFilter::try_from_env("ARANYA_EXAMPLE")
+            .unwrap_or_else(|_| EnvFilter::new("off")),
+    };
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
                 .with_file(false)
                 .with_target(false)
                 .compact()
-                .with_filter(EnvFilter::from_env("ARANYA_EXAMPLE")),
+                .with_filter(filter),
         )
         .init();
 
     info!("starting example Aranya application");
-
-    let role = std::env::args().nth(1).unwrap_or_else(|| "owner".to_string());
 
     let sync_interval = Duration::from_millis(100);
     let sleep_interval = sync_interval * 6;
@@ -144,21 +195,10 @@ async fn main() -> Result<()> {
 
     let mut team = TeamCtx::new("test_afc_router".into(), work_dir).await?;
 
-    let user_ctx = match role.as_str() {
-        "owner" => team.owner,
-        "admin" => team.admin,
-        "operator" => team.operator,
-        _ => return Err(anyhow::anyhow!("Invalid role: {}", role)),
-    };
-    /*
-        let mut user_ctx = match role.as_str() {
-        "owner" => team.owner.clone(),
-        "admin" => team.admin.clone(),
-        "operator" => team.operator.clone(),
-    */
     // create team.
     info!("creating team");
-    let team_id = user_ctx
+    let team_id = team
+        .owner
         .client
         .create_team()
         .await
@@ -286,10 +326,10 @@ async fn main() -> Result<()> {
 
     // assign network addresses.
     operator_team
-        .assign_net_identifier(team.membera.id, NetIdentifier(membera_afc_addr.to_string()))
+        .assign_afc_net_identifier(team.membera.id, NetIdentifier(membera_afc_addr.to_string()))
         .await?;
     operator_team
-        .assign_net_identifier(team.memberb.id, NetIdentifier(memberb_afc_addr.to_string()))
+        .assign_afc_net_identifier(team.memberb.id, NetIdentifier(memberb_afc_addr.to_string()))
         .await?;
 
     // wait for syncing.
@@ -299,71 +339,56 @@ async fn main() -> Result<()> {
     let afc_id1 = team
         .membera
         .client
-        .create_bidi_channel(team_id, NetIdentifier(memberb_afc_addr.to_string()), label1)
+        .create_afc_bidi_channel(team_id, NetIdentifier(memberb_afc_addr.to_string()), label1)
         .await?;
 
     // membera creates bidi channel with memberb
     let afc_id2 = team
         .membera
         .client
-        .create_bidi_channel(team_id, NetIdentifier(memberb_afc_addr.to_string()), label2)
+        .create_afc_bidi_channel(team_id, NetIdentifier(memberb_afc_addr.to_string()), label2)
         .await?;
 
     // wait for ctrl message to be sent.
     sleep(Duration::from_millis(100)).await;
 
-    // poll for ctrl message.
-    // TODO: poll in a separate task.
-    debug!("poll to send ctrl msg");
-    team.membera.client.poll().await?;
-    debug!("poll to recv ctrl msg");
-    team.memberb.client.poll().await?;
-    debug!("poll to recv ctrl msg");
-    team.memberb.client.poll().await?;
-
-    // poll for ctrl message.
-    // TODO: poll in a separate task.
-    debug!("poll to send ctrl msg");
-    team.membera.client.poll().await?;
-    debug!("poll to recv ctrl msg");
-    team.memberb.client.poll().await?;
-    debug!("poll to recv ctrl msg");
-    team.memberb.client.poll().await?;
+    do_poll!(team.membera.client, team.memberb.client);
 
     let msg = "hello world label1";
-    team.membera.client.send_data(afc_id1, msg.into()).await?;
+    team.membera
+        .client
+        .send_afc_data(afc_id1, msg.as_bytes())
+        .await?;
     debug!(?msg, "sent message");
 
     let msg = "hello world label2";
-    team.membera.client.send_data(afc_id2, msg.into()).await?;
+    team.membera
+        .client
+        .send_afc_data(afc_id2, msg.as_bytes())
+        .await?;
     debug!(?msg, "sent message");
 
-    // poll for data message.
-    debug!("polling to send data msg");
-    team.membera.client.poll().await?;
-    debug!("polling to recv data msg");
-    team.memberb.client.poll().await?;
+    sleep(Duration::from_millis(100)).await;
+    do_poll!(team.membera.client, team.memberb.client);
 
-    // poll for data message.
-    debug!("polling to send data msg");
-    team.membera.client.poll().await?;
-    debug!("polling to recv data msg");
-    team.memberb.client.poll().await?;
-
-    let AfcMsg { data, label, .. } = team.memberb.client.recv_data().await?;
+    let Some(AfcMsg { data, label, .. }) = team.memberb.client.try_recv_afc_data() else {
+        bail!("no message available!")
+    };
     debug!(
         n = data.len(),
         ?label,
         "received message: {:?}",
-        str::from_utf8(&data)?
+        core::str::from_utf8(&data)?
     );
 
-    let AfcMsg { data, label, .. } = team.memberb.client.recv_data().await?;
+    let Some(AfcMsg { data, label, .. }) = team.memberb.client.try_recv_afc_data() else {
+        bail!("no message available!")
+    };
     debug!(
         n = data.len(),
         ?label,
         "received message: {:?}",
-        str::from_utf8(&data)?
+        core::str::from_utf8(&data)?
     );
 
     info!("completed example Aranya application");
